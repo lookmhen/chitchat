@@ -13,6 +13,11 @@ interface Message {
     isSystem?: boolean;
     timestamp?: string;
     reactions?: { [emoji: string]: string[] };
+    replyTo?: {
+        id: string;
+        user: string;
+        text: string;
+    };
 }
 
 interface ChatProps {
@@ -101,6 +106,7 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
     const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
     const [showUserList, setShowUserList] = useState(false);
     const [joinRequests, setJoinRequests] = useState<{ username: string; socketId: string }[]>([]);
+    const [replyingTo, setReplyingTo] = useState<Message | null>(null);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -241,7 +247,7 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, typingUsers]);
+    }, [messages, typingUsers, replyingTo]);
 
     const createPeerConnection = () => {
         const pc = new RTCPeerConnection(rtcConfig);
@@ -398,12 +404,18 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                 text: input,
                 type: 'text',
                 timestamp: new Date().toISOString(),
-                reactions: {}
+                reactions: {},
+                replyTo: replyingTo ? {
+                    id: replyingTo.id!,
+                    user: replyingTo.user,
+                    text: replyingTo.text || (replyingTo.type === 'image' ? 'Image' : replyingTo.type === 'audio' ? 'Audio' : 'GIF')
+                } : undefined
             };
             socketRef.current?.emit('message', msg);
             socketRef.current?.emit('stop-typing');
             setInput('');
             setShowEmoji(false);
+            setReplyingTo(null);
         }
     };
 
@@ -430,9 +442,15 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                         type: 'audio',
                         audio: base64Audio,
                         timestamp: new Date().toISOString(),
-                        reactions: {}
+                        reactions: {},
+                        replyTo: replyingTo ? {
+                            id: replyingTo.id!,
+                            user: replyingTo.user,
+                            text: replyingTo.text || (replyingTo.type === 'image' ? 'Image' : replyingTo.type === 'audio' ? 'Audio' : 'GIF')
+                        } : undefined
                     };
                     socketRef.current?.emit('message', msg);
+                    setReplyingTo(null);
                 };
                 stream.getTracks().forEach(track => track.stop());
             };
@@ -476,10 +494,16 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
             type: 'gif',
             gif: gifUrl,
             timestamp: new Date().toISOString(),
-            reactions: {}
+            reactions: {},
+            replyTo: replyingTo ? {
+                id: replyingTo.id!,
+                user: replyingTo.user,
+                text: replyingTo.text || (replyingTo.type === 'image' ? 'Image' : replyingTo.type === 'audio' ? 'Audio' : 'GIF')
+            } : undefined
         };
         socketRef.current?.emit('message', msg);
         setShowGif(false);
+        setReplyingTo(null);
     };
 
     const onEmojiClick = (emojiData: EmojiClickData) => {
@@ -674,6 +698,16 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                                         {/* Username for other users */}
                                         {!isMyMsg && <p className={`text-xs font-bold mb-1 opacity-70 ${theme.title}`}>{msg.user}</p>}
 
+                                        {/* Reply Context */}
+                                        {msg.replyTo && (
+                                            <div className="mb-2 p-2 rounded bg-black/5 border-l-4 border-gray-400 text-xs cursor-pointer hover:bg-black/10 transition-colors" onClick={() => {
+                                                // Optional: Scroll to replied message
+                                            }}>
+                                                <p className="font-bold opacity-70">{msg.replyTo.user}</p>
+                                                <p className="truncate opacity-60">{msg.replyTo.text}</p>
+                                            </div>
+                                        )}
+
                                         {/* Message Content */}
                                         {msg.type === 'text' && <p className="text-sm md:text-base leading-relaxed">{msg.text}</p>}
                                         {msg.type === 'audio' && (
@@ -700,11 +734,21 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                                             </div>
                                         )}
 
-                                        {/* Reaction Button (Hover) */}
-                                        <div className={`absolute top-0 ${isMyMsg ? '-left-8' : '-right-8'} opacity-0 group-hover:opacity-100 transition-opacity`}>
+                                        {/* Message Actions (Reply & React) */}
+                                        <div className={`absolute top-0 ${isMyMsg ? '-left-16' : '-right-16'} opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`}>
+                                            <button
+                                                onClick={() => setReplyingTo(msg)}
+                                                className="p-1 rounded-full bg-white shadow-sm hover:bg-gray-50 text-gray-400 hover:text-blue-500 transition-colors"
+                                                title="Reply"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fillRule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+                                                </svg>
+                                            </button>
                                             <button
                                                 onClick={() => handleReaction(msg.id!, '❤️')}
                                                 className="p-1 rounded-full bg-white shadow-sm hover:bg-gray-50 text-gray-400 hover:text-red-500 transition-colors"
+                                                title="Like"
                                             >
                                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                                                     <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
@@ -733,6 +777,27 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
 
                 {/* Input Area */}
                 <div className="p-4 bg-white/80 backdrop-blur-md border-t border-white/20">
+                    {/* Reply Preview */}
+                    {replyingTo && (
+                        <div className="flex items-center justify-between bg-gray-100 p-2 rounded-t-lg border-b border-gray-200 mb-2 animate-slideUp">
+                            <div className="flex items-center gap-2 overflow-hidden">
+                                <div className="w-1 h-8 bg-blue-500 rounded-full"></div>
+                                <div className="flex flex-col text-xs">
+                                    <span className="font-bold text-blue-600">Replying to {replyingTo.user}</span>
+                                    <span className="text-gray-500 truncate max-w-xs">{replyingTo.text || (replyingTo.type === 'image' ? 'Image' : replyingTo.type === 'audio' ? 'Audio' : 'GIF')}</span>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setReplyingTo(null)}
+                                className="p-1 hover:bg-gray-200 rounded-full text-gray-500"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                </svg>
+                            </button>
+                        </div>
+                    )}
+
                     <form onSubmit={sendMessage} className="flex items-end gap-2 max-w-4xl mx-auto relative">
                         {/* Emoji Picker */}
                         <div className="relative">
