@@ -18,7 +18,7 @@ let socket: Socket;
 export default function Login({ onJoin }: LoginProps) {
     const searchParams = useSearchParams();
     const [username, setUsername] = useState('');
-    const [room, setRoom] = useState(searchParams.get('room') || '');
+    const [room, setRoom] = useState(decodeURIComponent(searchParams.get('room') || '').trim());
     const [password, setPassword] = useState('');
     const [activeRooms, setActiveRooms] = useState<RoomInfo[]>([]);
     const [showPasswordInput, setShowPasswordInput] = useState(false);

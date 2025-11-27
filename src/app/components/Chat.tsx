@@ -13,6 +13,7 @@ interface Message {
     isSystem?: boolean;
     timestamp?: string;
     reactions?: { [emoji: string]: string[] };
+    image?: string;
     replyTo?: {
         id: string;
         user: string;
@@ -119,6 +120,7 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
     const socketRef = useRef<Socket | null>(null);
     const isScreenSharingRef = useRef(false);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     const theme = themes[currentTheme];
 
@@ -506,6 +508,37 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
         setReplyingTo(null);
     };
 
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            if (file.size > 2 * 1024 * 1024) { // 2MB limit
+                alert("File size too large. Please select an image under 2MB.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64Image = reader.result as string;
+                const msg: Message = {
+                    id: generateUUID(),
+                    user: username,
+                    type: 'image',
+                    image: base64Image,
+                    timestamp: new Date().toISOString(),
+                    reactions: {},
+                    replyTo: replyingTo ? {
+                        id: replyingTo.id!,
+                        user: replyingTo.user,
+                        text: replyingTo.text || (replyingTo.type === 'image' ? 'Image' : replyingTo.type === 'audio' ? 'Audio' : 'GIF')
+                    } : undefined
+                };
+                socketRef.current?.emit('message', msg);
+                setReplyingTo(null);
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
     const onEmojiClick = (emojiData: EmojiClickData) => {
         setInput((prev) => prev + emojiData.emoji);
     };
@@ -767,6 +800,9 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
 
                                         {/* Message Content */}
                                         {msg.type === 'text' && <p className="text-sm md:text-base leading-relaxed">{msg.text}</p>}
+                                        {msg.type === 'image' && (
+                                            <img src={msg.image} alt="Shared Image" className="rounded-lg max-w-[200px] md:max-w-xs cursor-pointer hover:opacity-90 transition-opacity" onClick={() => window.open(msg.image, '_blank')} />
+                                        )}
                                         {msg.type === 'audio' && (
                                             <audio controls src={msg.audio} className="max-w-[200px] h-10" />
                                         )}
@@ -909,6 +945,27 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                                     </div>
                                 </div>
                             )}
+                        </div>
+
+                        {/* Image Upload */}
+                        <div className="relative">
+                            <input
+                                type="file"
+                                accept="image/*"
+                                ref={fileInputRef}
+                                onChange={handleFileSelect}
+                                className="hidden"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="p-2 text-gray-500 hover:text-green-500 transition-colors rounded-full hover:bg-gray-100"
+                                title="Upload Image"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                </svg>
+                            </button>
                         </div>
 
                         {/* Audio Recording */}
