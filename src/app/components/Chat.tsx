@@ -510,6 +510,50 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
         setInput((prev) => prev + emojiData.emoji);
     };
 
+    const copyInviteLink = () => {
+        const url = `${window.location.origin}?room=${encodeURIComponent(room)}`;
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(() => {
+                alert("Invite link copied to clipboard!");
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+                fallbackCopyTextToClipboard(url);
+            });
+        } else {
+            fallbackCopyTextToClipboard(url);
+        }
+    };
+
+    const fallbackCopyTextToClipboard = (text: string) => {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+
+        // Avoid scrolling to bottom
+        textArea.style.top = "0";
+        textArea.style.left = "0";
+        textArea.style.position = "fixed";
+
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+
+        try {
+            const successful = document.execCommand('copy');
+            const msg = successful ? 'successful' : 'unsuccessful';
+            if (successful) {
+                alert("Invite link copied to clipboard!");
+            } else {
+                alert("Failed to copy link. Please copy manually: " + text);
+            }
+        } catch (err) {
+            console.error('Fallback: Oops, unable to copy', err);
+            alert("Failed to copy link. Please copy manually: " + text);
+        }
+
+        document.body.removeChild(textArea);
+    };
+
     return (
         <div className={`flex h-screen ${theme.bg} transition-colors duration-300`}>
             {/* Sidebar */}
@@ -550,6 +594,19 @@ export default function Chat({ username, room, password, onLeave }: ChatProps) {
                     </div>
 
                     <div className="flex items-center gap-3">
+                        {/* Invite Link Button */}
+                        <button
+                            onClick={copyInviteLink}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-white/50 hover:bg-white/80 transition-colors text-sm font-medium text-gray-700 shadow-sm"
+                            title="Copy Invite Link"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M8 2a1 1 0 000 2h2a1 1 0 100-2H8z" />
+                                <path d="M3 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v6h-4.586l1.293-1.293a1 1 0 00-1.414-1.414l-3 3a1 1 0 000 1.414l3 3a1 1 0 001.414-1.414L10.414 13H15v3a2 2 0 01-2 2H5a2 2 0 01-2-2V5zM15 11h2a1 1 0 110 2h-2v-2z" />
+                            </svg>
+                            <span>Invite</span>
+                        </button>
+
                         {/* Theme Selector */}
                         <div className="flex gap-1 mr-4">
                             {(Object.keys(themes) as ThemeKey[]).map((t) => (
