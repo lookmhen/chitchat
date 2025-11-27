@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import EmojiPicker, { EmojiClickData, Theme as EmojiTheme } from 'emoji-picker-react';
 
@@ -18,6 +18,7 @@ interface Message {
 interface ChatProps {
     username: string;
     room: string;
+    password?: string;
     onLeave: () => void;
 }
 
@@ -85,7 +86,7 @@ const rtcConfig = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
-export default function Chat({ username, room, onLeave }: ChatProps) {
+export default function Chat({ username, room, password, onLeave }: ChatProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [showEmoji, setShowEmoji] = useState(false);
@@ -99,6 +100,7 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
     const [users, setUsers] = useState<string[]>([]);
     const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
     const [showUserList, setShowUserList] = useState(false);
+    const [joinRequests, setJoinRequests] = useState<{ username: string; socketId: string }[]>([]);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -115,24 +117,42 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
     const theme = themes[currentTheme];
 
     useEffect(() => {
-        socketRef.current = io('http://localhost:3001');
+        const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || `http://${window.location.hostname}:${process.env.NEXT_PUBLIC_SOCKET_PORT || 3001}`;
+        socketRef.current = io(socketUrl);
 
         socketRef.current.on('connect', () => {
-            socketRef.current?.emit('join', { username, room });
+            socketRef.current?.emit('join', { username, room, password });
         });
 
         socketRef.current.on('message', (msg: Message) => {
-            setMessages((prev) => [...prev, msg]);
+            setMessages(prev => [...prev, msg]);
         });
 
+        socketRef.current.on('message-history', (history: Message[]) => {
+            setMessages(history);
+        });
+
+        // Join Request Listeners
+        socketRef.current.on('join-request-received', ({ username: reqUser, socketId }) => {
+            setJoinRequests(prev => [...prev, { username: reqUser, socketId }]);
+        });
+
+        socketRef.current.on('request-approved', ({ room: approvedRoom }) => {
+            socketRef.current?.emit('join', { username, room: approvedRoom, password: '' });
+        });
+
+        // WebRTC Listeners
         socketRef.current.on('offer', async (offer) => {
             if (!peerConnectionRef.current) {
-                peerConnectionRef.current = createPeerConnection();
+                createPeerConnection();
             }
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
-            const answer = await peerConnectionRef.current.createAnswer();
-            await peerConnectionRef.current.setLocalDescription(answer);
-            socketRef.current?.emit('answer', answer);
+            if (peerConnectionRef.current) {
+                await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await peerConnectionRef.current.createAnswer();
+                await peerConnectionRef.current.setLocalDescription(answer);
+                socketRef.current?.emit('answer', answer);
+                setIsInCall(true);
+            }
         });
 
         socketRef.current.on('answer', async (answer) => {
@@ -206,7 +226,7 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
             if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => track.stop());
             if (peerConnectionRef.current) peerConnectionRef.current.close();
         };
-    }, [username, room]);
+    }, [username, room, password]);
 
     useEffect(() => {
         if (hasRemoteStream && remoteVideoRef.current && remoteStreamRef.current) {
@@ -349,11 +369,31 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
         socketRef.current?.emit('reaction', { messageId, emoji, username });
     };
 
+    const handleApprove = (socketId: string) => {
+        socketRef.current?.emit('approve-request', { socketId, room });
+        setJoinRequests(prev => prev.filter(req => req.socketId !== socketId));
+    };
+
+    const handleDeny = (socketId: string) => {
+        socketRef.current?.emit('deny-request', { socketId, room });
+        setJoinRequests(prev => prev.filter(req => req.socketId !== socketId));
+    };
+
+    const generateUUID = () => {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    };
+
     const sendMessage = (e?: React.FormEvent) => {
         e?.preventDefault();
         if (input.trim()) {
             const msg: Message = {
-                id: crypto.randomUUID(),
+                id: generateUUID(),
                 user: username,
                 text: input,
                 type: 'text',
@@ -385,7 +425,7 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
                 reader.onloadend = () => {
                     const base64Audio = reader.result as string;
                     const msg: Message = {
-                        id: crypto.randomUUID(),
+                        id: generateUUID(),
                         user: username,
                         type: 'audio',
                         audio: base64Audio,
@@ -412,10 +452,6 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
         }
     };
 
-    const onEmojiClick = (emojiData: EmojiClickData) => {
-        setInput((prev) => prev + emojiData.emoji);
-    };
-
     const fetchGifs = async (searchTerm: string = '') => {
         const apiKey = 'sXpGFDGZs0Dv1mmNFvYaGUvYwKX0PWIh';
         const limit = 20;
@@ -435,7 +471,7 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
 
     const sendGif = (gifUrl: string) => {
         const msg: Message = {
-            id: crypto.randomUUID(),
+            id: generateUUID(),
             user: username,
             type: 'gif',
             gif: gifUrl,
@@ -446,305 +482,350 @@ export default function Chat({ username, room, onLeave }: ChatProps) {
         setShowGif(false);
     };
 
-    const handleLeave = () => {
-        if (localStreamRef.current) localStreamRef.current.getTracks().forEach(track => track.stop());
-        if (peerConnectionRef.current) peerConnectionRef.current.close();
-        socketRef.current?.disconnect();
-        onLeave();
+    const onEmojiClick = (emojiData: EmojiClickData) => {
+        setInput((prev) => prev + emojiData.emoji);
     };
 
     return (
-        <div className={`flex flex-col h-screen ${theme.bg} text-gray-800 transition-colors duration-500`}>
-            <header className={`p-4 ${theme.header} backdrop-blur-md border-b flex justify-between items-center sticky top-0 z-10 shadow-sm transition-colors duration-500`}>
-                <div className="flex flex-col">
-                    <h1 className={`text-xl font-bold ${theme.title}`}>
-                        {room} <span className="text-sm font-normal opacity-70">({username})</span>
-                    </h1>
-                    <div className="flex gap-2 mt-1">
-                        {(Object.keys(themes) as ThemeKey[]).map((t) => (
-                            <button
-                                key={t}
-                                onClick={() => setCurrentTheme(t)}
-                                className={`w-4 h-4 rounded-full ${themes[t].color} border border-white/50 shadow-sm hover:scale-125 transition-transform ${currentTheme === t ? 'ring-2 ring-white' : ''}`}
-                                title={themes[t].name}
-                            />
+        <div className={`flex h-screen ${theme.bg} transition-colors duration-300`}>
+            {/* Sidebar */}
+            <div className={`transition-all duration-300 ${showUserList ? 'w-64' : 'w-0'} overflow-hidden bg-white/80 backdrop-blur-md border-r border-white/20 shadow-lg`}>
+                <div className="p-4">
+                    <h3 className={`font-bold mb-4 ${theme.title}`}>Active Users ({users.length})</h3>
+                    <ul className="space-y-2">
+                        {users.map((user, index) => (
+                            <li key={index} className="flex items-center gap-2 p-2 rounded-lg hover:bg-white/50 transition-colors">
+                                <div className={`w-2 h-2 rounded-full ${user === username ? 'bg-green-500' : 'bg-gray-400'}`} />
+                                <span className="text-gray-700 font-medium">{user} {user === username && '(You)'}</span>
+                            </li>
                         ))}
-                    </div>
-                </div>
-                <div className="flex gap-2 items-center">
-                    <button
-                        onClick={() => setShowUserList(!showUserList)}
-                        className="px-3 py-1 bg-white/50 hover:bg-white/80 text-gray-800 rounded-full text-sm font-semibold transition-colors mr-2"
-                    >
-                        👥 {users.length}
-                    </button>
-
-                    {!isInCall && !isScreenSharing && (
-                        <>
-                            <button onClick={startCall} className="px-3 py-1 bg-green-300 hover:bg-green-400 text-green-900 rounded-full text-sm font-semibold transition-colors">
-                                Join Voice
-                            </button>
-                            <button onClick={startScreenShare} className="px-3 py-1 bg-purple-300 hover:bg-purple-400 text-purple-900 rounded-full text-sm font-semibold transition-colors">
-                                Share Screen
-                            </button>
-                        </>
-                    )}
-                    {isInCall && (
-                        <button onClick={stopCall} className="px-3 py-1 bg-red-400 hover:bg-red-500 text-white rounded-full text-sm font-semibold transition-colors">
-                            Stop Voice
-                        </button>
-                    )}
-                    {isScreenSharing && (
-                        <button onClick={stopScreenShare} className="px-3 py-1 bg-red-400 hover:bg-red-500 text-white rounded-full text-sm font-semibold transition-colors">
-                            Stop Sharing
-                        </button>
-                    )}
-                    <button onClick={handleLeave} className="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-gray-800 rounded-full text-sm font-semibold transition-colors">
-                        Leave Room
-                    </button>
-                </div>
-            </header>
-
-            <div className="flex flex-1 overflow-hidden">
-                {/* User List Sidebar */}
-                {showUserList && (
-                    <div className="w-64 bg-white/90 backdrop-blur-sm border-r border-gray-200 p-4 overflow-y-auto transition-all">
-                        <h3 className="font-bold text-gray-700 mb-3">Online Users ({users.length})</h3>
-                        <ul className="space-y-2">
-                            {users.map((u, i) => (
-                                <li key={i} className="flex items-center gap-2 text-sm text-gray-600">
-                                    <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                                    {u} {u === username && '(You)'}
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
-                )}
-
-                <div className="flex-1 flex flex-col overflow-hidden">
-                    {(isInCall || isScreenSharing || hasRemoteStream) && (
-                        <div className="flex flex-col gap-4 p-4 bg-gray-900/95 shrink-0">
-                            <div className="max-w-6xl mx-auto w-full">
-                                <div className="mb-4 relative">
-                                    <p className="text-white text-sm mb-2">Remote User:</p>
-                                    <video
-                                        ref={remoteVideoRef}
-                                        autoPlay
-                                        playsInline
-                                        className="w-full max-h-[40vh] rounded-lg shadow-2xl border-2 border-green-400 bg-black"
-                                    />
-                                    <button
-                                        onClick={() => toggleFullscreen(remoteVideoRef)}
-                                        className="absolute top-10 right-2 bg-black/50 hover:bg-black/70 text-white p-2 rounded-lg"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                                        </svg>
-                                    </button>
-                                </div>
-
-                                {isScreenSharing && (
-                                    <div className="relative">
-                                        <p className="text-white text-sm mb-2">Your Screen (Preview):</p>
-                                        <video
-                                            ref={localVideoRef}
-                                            autoPlay
-                                            muted
-                                            playsInline
-                                            className="w-full max-h-[20vh] rounded-lg shadow-2xl border-2 border-purple-400 bg-black"
-                                        />
-                                        <button
-                                            onClick={() => toggleFullscreen(localVideoRef)}
-                                            className="absolute top-10 right-2 bg-black/50 hover:bg-black/70 text-white p-2 rounded-lg"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                                                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                                            </svg>
-                                        </button>
-                                    </div>
-                                )}
-
-                                {isInCall && !isScreenSharing && !hasRemoteStream && (
-                                    <div className="text-center p-4">
-                                        <p className="text-white text-lg">🎤 Voice call active</p>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="flex-1 overflow-y-auto p-4 space-y-4 max-w-3xl mx-auto w-full">
-                        {messages.map((msg, idx) => (
-                            <div
-                                key={idx}
-                                className={`flex flex-col ${msg.isSystem ? 'items-center' : msg.user === username ? 'items-end' : 'items-start'}`}
-                            >
-                                {msg.isSystem ? (
-                                    <span className="text-xs text-gray-500 bg-gray-200/50 px-3 py-1 rounded-full">
-                                        {msg.text}
-                                    </span>
-                                ) : (
-                                    <div className="relative group max-w-[85%] md:max-w-[70%]">
-                                        <div
-                                            className={`rounded-2xl px-5 py-3 shadow-sm ${msg.user === username
-                                                ? `${theme.myMsg} rounded-tr-none`
-                                                : `${theme.otherMsg} border border-gray-100 rounded-tl-none`
-                                                }`}
-                                        >
-                                            {!msg.isSystem && msg.user !== username && (
-                                                <p className="text-sm font-bold mb-1 opacity-70">{msg.user}</p>
-                                            )}
-
-                                            {msg.type === 'audio' ? (
-                                                <audio controls src={msg.audio} className="mt-1" />
-                                            ) : msg.type === 'gif' ? (
-                                                <img src={msg.gif} alt="GIF" className="max-w-full rounded-lg" />
-                                            ) : (
-                                                <p className="break-words text-base leading-relaxed">{msg.text}</p>
-                                            )}
-
-                                            <p className="text-xs mt-1.5 text-right opacity-60">
-                                                {new Date(msg.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                            </p>
-                                        </div>
-
-                                        {/* Reactions Display */}
-                                        {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                                            <div className={`flex gap-1 mt-1 ${msg.user === username ? 'justify-end' : 'justify-start'}`}>
-                                                {Object.entries(msg.reactions).map(([emoji, users]) => (
-                                                    <button
-                                                        key={emoji}
-                                                        onClick={() => msg.id && handleReaction(msg.id, emoji)}
-                                                        className={`text-xs px-2 py-1 rounded-full border border-gray-200 bg-white hover:bg-gray-50 transition-colors ${users.includes(username) ? 'bg-blue-50 border-blue-200' : ''}`}
-                                                        title={users.join(', ')}
-                                                    >
-                                                        {emoji} {users.length}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        {/* Reaction Buttons (Hover) */}
-                                        {!msg.isSystem && (
-                                            <div className={`absolute top-0 ${msg.user === username ? '-left-20' : '-right-20'} opacity-0 group-hover:opacity-100 transition-opacity flex gap-1 bg-white shadow-md rounded-full p-1`}>
-                                                {['👍', '❤️', '😂', '😮'].map(emoji => (
-                                                    <button
-                                                        key={emoji}
-                                                        onClick={() => msg.id && handleReaction(msg.id, emoji)}
-                                                        className="hover:scale-125 transition-transform p-1"
-                                                    >
-                                                        {emoji}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        ))}
-
-                        {/* Typing Indicator */}
-                        {typingUsers.size > 0 && (
-                            <div className="text-xs text-gray-500 italic ml-4 animate-pulse">
-                                {Array.from(typingUsers).join(', ')} is typing...
-                            </div>
-                        )}
-
-                        <div ref={messagesEndRef} />
-                    </div>
+                    </ul>
                 </div>
             </div>
 
-            <div className="p-4 bg-white/80 backdrop-blur-md border-t border-gray-200">
-                <div className="max-w-3xl mx-auto flex items-center gap-2">
-                    <button
-                        type="button"
-                        onClick={() => setShowEmoji(!showEmoji)}
-                        className="p-3 text-gray-400 hover:text-yellow-400 transition-colors rounded-full hover:bg-gray-100"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.182 15.182a4.5 4.5 0 01-6.364 0M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75zm-.375 0h.008v.015h-.008V9.75zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75zm-.375 0h.008v.015h-.008V9.75z" />
-                        </svg>
-                    </button>
-
-                    <button
-                        type="button"
-                        onClick={() => {
-                            setShowGif(!showGif);
-                            if (!showGif) fetchGifs();
-                        }}
-                        className="p-3 text-gray-400 hover:text-pink-400 transition-colors rounded-full hover:bg-gray-100"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
-                        </svg>
-                    </button>
-
-                    {showEmoji && (
-                        <div className="absolute bottom-24 left-4 z-20 shadow-xl rounded-xl overflow-hidden border border-gray-200">
-                            <EmojiPicker onEmojiClick={onEmojiClick} theme={EmojiTheme.LIGHT} width={300} height={400} />
+            {/* Main Chat Area */}
+            <div className="flex-1 flex flex-col relative">
+                {/* Header */}
+                <header className={`${theme.header} p-4 flex justify-between items-center shadow-sm backdrop-blur-md z-10`}>
+                    <div className="flex items-center gap-4">
+                        <button
+                            onClick={() => setShowUserList(!showUserList)}
+                            className={`p-2 rounded-full hover:bg-white/20 transition-colors ${theme.title}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                            </svg>
+                        </button>
+                        <div>
+                            <h1 className={`text-xl font-bold ${theme.title}`}>{room}</h1>
+                            <p className="text-sm text-gray-600 flex items-center gap-2">
+                                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                {users.length} online
+                            </p>
                         </div>
-                    )}
+                    </div>
 
-                    {showGif && (
-                        <div className="absolute bottom-24 left-4 z-20 w-96 h-96 bg-white shadow-2xl rounded-xl overflow-hidden border border-gray-200">
-                            <div className="p-3 border-b">
-                                <input
-                                    type="text"
-                                    placeholder="Search GIFs..."
-                                    onChange={(e) => fetchGifs(e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-pink-300"
+                    <div className="flex items-center gap-3">
+                        {/* Theme Selector */}
+                        <div className="flex gap-1 mr-4">
+                            {(Object.keys(themes) as ThemeKey[]).map((t) => (
+                                <button
+                                    key={t}
+                                    onClick={() => setCurrentTheme(t)}
+                                    className={`w-6 h-6 rounded-full border-2 ${currentTheme === t ? 'border-gray-600 scale-110' : 'border-transparent'} ${themes[t].color} transition-all`}
+                                    title={themes[t].name}
+                                />
+                            ))}
+                        </div>
+
+                        {/* Call Controls */}
+                        {!isInCall && !isScreenSharing && (
+                            <>
+                                <button onClick={startCall} className="p-2 rounded-full bg-green-500 text-white hover:bg-green-600 transition-all shadow-md hover:shadow-lg">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z" />
+                                    </svg>
+                                </button>
+                                <button onClick={startScreenShare} className="p-2 rounded-full bg-blue-500 text-white hover:bg-blue-600 transition-all shadow-md hover:shadow-lg">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.923 2.489a1 1 0 01-1.874.695L11.118 16H8.882l-.923 2.489a1 1 0 01-1.874-.695L6.995 16H4.78a2 2 0 01-2-2V5zm2 0v8h10V5H5z" clipRule="evenodd" />
+                                    </svg>
+                                </button>
+                            </>
+                        )}
+                        {(isInCall || isScreenSharing) && (
+                            <button onClick={isInCall ? stopCall : stopScreenShare} className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600 transition-all shadow-md hover:shadow-lg animate-pulse">
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fillRule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.923 2.489a1 1 0 01-1.874.695L11.118 16H8.882l-.923 2.489a1 1 0 01-1.874-.695L6.995 16H4.78a2 2 0 01-2-2V5zm2 0v8h10V5H5z" clipRule="evenodd" />
+                                </svg>
+                            </button>
+                        )}
+
+                        <button onClick={onLeave} className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-all shadow-md hover:shadow-lg font-medium">
+                            Leave
+                        </button>
+                    </div>
+                </header>
+
+                {/* Join Requests Notification */}
+                {joinRequests.length > 0 && (
+                    <div className="bg-yellow-100 border-b border-yellow-200 p-3 animate-slideDown">
+                        <div className="max-w-3xl mx-auto flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-yellow-800">
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                                </svg>
+                                <span className="font-medium">Join Requests:</span>
+                            </div>
+                            <div className="flex gap-4">
+                                {joinRequests.map((req) => (
+                                    <div key={req.socketId} className="flex items-center gap-3 bg-white px-3 py-1 rounded-full shadow-sm">
+                                        <span className="font-medium text-gray-700">{req.username}</span>
+                                        <div className="flex gap-1">
+                                            <button
+                                                onClick={() => handleApprove(req.socketId)}
+                                                className="p-1 rounded-full bg-green-100 text-green-600 hover:bg-green-200 transition-colors"
+                                                title="Approve"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                                </svg>
+                                            </button>
+                                            <button
+                                                onClick={() => handleDeny(req.socketId)}
+                                                className="p-1 rounded-full bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+                                                title="Deny"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Video Area */}
+                {(hasRemoteStream || isScreenSharing) && (
+                    <div className="absolute top-20 right-4 w-64 md:w-80 bg-black rounded-xl overflow-hidden shadow-2xl z-20 transition-all hover:scale-105">
+                        <div className="relative aspect-video bg-gray-900">
+                            <video
+                                ref={remoteVideoRef}
+                                autoPlay
+                                playsInline
+                                className="w-full h-full object-cover"
+                            />
+                            <div className="absolute bottom-2 right-2 flex gap-2">
+                                <button
+                                    onClick={() => toggleFullscreen(remoteVideoRef)}
+                                    className="p-1.5 rounded-lg bg-black/50 text-white hover:bg-black/70 backdrop-blur-sm transition-all"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 11-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-2.293 2.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 7a1 1 0 012 0v1.586l2.293-2.293a1 1 0 111.414 1.414L6.414 15H8a1 1 0 010 2H4a1 1 0 01-1-1v-4zm13-1a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 010-2h1.586l-2.293-2.293a1 1 0 111.414-1.414L15 13.586V12a1 1 0 011-1z" clipRule="evenodd" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        {isScreenSharing && (
+                            <div className="absolute bottom-4 right-4 w-24 aspect-video bg-gray-800 rounded-lg overflow-hidden border-2 border-white/20 shadow-lg">
+                                <video
+                                    ref={localVideoRef}
+                                    autoPlay
+                                    playsInline
+                                    muted
+                                    className="w-full h-full object-cover"
                                 />
                             </div>
-                            <div className="grid grid-cols-2 gap-2 p-3 overflow-y-auto h-80">
-                                {gifs.length > 0 ? gifs.map((gif) => (
-                                    <img
-                                        key={gif.id}
-                                        src={gif.images.fixed_height_small.url}
-                                        alt={gif.title}
-                                        onClick={() => sendGif(gif.images.original.url)}
-                                        className="w-full h-32 object-cover rounded-lg cursor-pointer hover:scale-105 transition-transform"
-                                    />
-                                )) : (
-                                    <p className="col-span-2 text-center text-gray-500 p-4">Loading GIFs...</p>
-                                )}
+                        )}
+                    </div>
+                )}
+
+                {/* Messages */}
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 scroll-smooth">
+                    {messages.map((msg, index) => {
+                        const isMyMsg = msg.user === username;
+                        const isSystem = msg.isSystem;
+
+                        if (isSystem) {
+                            return (
+                                <div key={index} className="flex justify-center my-4">
+                                    <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full border border-gray-200">
+                                        {msg.text}
+                                    </span>
+                                </div>
+                            );
+                        }
+
+                        return (
+                            <div key={index} className={`flex flex-col ${isMyMsg ? 'items-end' : 'items-start'} animate-fadeIn`}>
+                                <div className="flex items-end gap-2 max-w-[80%]">
+                                    {!isMyMsg && (
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-sm ${theme.button}`}>
+                                            {msg.user.substring(0, 2).toUpperCase()}
+                                        </div>
+                                    )}
+                                    <div className={`
+                                        rounded-2xl px-4 py-2 shadow-sm relative group transition-all hover:shadow-md
+                                        ${isMyMsg ? `${theme.myMsg} rounded-br-none` : `${theme.otherMsg} rounded-bl-none`}
+                                    `}>
+                                        {/* Username for other users */}
+                                        {!isMyMsg && <p className={`text-xs font-bold mb-1 opacity-70 ${theme.title}`}>{msg.user}</p>}
+
+                                        {/* Message Content */}
+                                        {msg.type === 'text' && <p className="text-sm md:text-base leading-relaxed">{msg.text}</p>}
+                                        {msg.type === 'audio' && (
+                                            <audio controls src={msg.audio} className="max-w-[200px] h-10" />
+                                        )}
+                                        {msg.type === 'gif' && (
+                                            <img src={msg.gif} alt="GIF" className="rounded-lg max-w-[200px] md:max-w-xs" />
+                                        )}
+
+                                        {/* Timestamp */}
+                                        <p className="text-[10px] opacity-50 mt-1 text-right">
+                                            {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                        </p>
+
+                                        {/* Reactions */}
+                                        {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                                            <div className="absolute -bottom-3 right-2 flex gap-1">
+                                                {Object.entries(msg.reactions).map(([emoji, users]) => (
+                                                    <div key={emoji} className="bg-white rounded-full px-1.5 py-0.5 text-xs shadow-sm border border-gray-100 flex items-center gap-1" title={users.join(', ')}>
+                                                        <span>{emoji}</span>
+                                                        <span className="text-gray-500 font-medium">{users.length}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        {/* Reaction Button (Hover) */}
+                                        <div className={`absolute top-0 ${isMyMsg ? '-left-8' : '-right-8'} opacity-0 group-hover:opacity-100 transition-opacity`}>
+                                            <button
+                                                onClick={() => handleReaction(msg.id!, '❤️')}
+                                                className="p-1 rounded-full bg-white shadow-sm hover:bg-gray-50 text-gray-400 hover:text-red-500 transition-colors"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
+                        );
+                    })}
+
+                    {/* Typing Indicator */}
+                    {typingUsers.size > 0 && (
+                        <div className="flex items-center gap-2 text-gray-500 text-xs ml-12 animate-pulse">
+                            <div className="flex gap-1">
+                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                            </div>
+                            <span>{Array.from(typingUsers).join(', ')} is typing...</span>
                         </div>
                     )}
+                    <div ref={messagesEndRef} />
+                </div>
 
-                    <input
-                        type="text"
-                        value={input}
-                        onChange={(e) => {
-                            setInput(e.target.value);
-                            handleTyping();
-                        }}
-                        onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-                        placeholder="Type a message..."
-                        className={`flex-1 bg-gray-100 border border-gray-200 text-gray-800 rounded-full px-6 py-3 focus:outline-none focus:ring-2 ${theme.ring} focus:border-transparent placeholder-gray-400 shadow-inner`}
-                    />
+                {/* Input Area */}
+                <div className="p-4 bg-white/80 backdrop-blur-md border-t border-white/20">
+                    <form onSubmit={sendMessage} className="flex items-end gap-2 max-w-4xl mx-auto relative">
+                        {/* Emoji Picker */}
+                        <div className="relative">
+                            <button
+                                type="button"
+                                onClick={() => setShowEmoji(!showEmoji)}
+                                className="p-2 text-gray-500 hover:text-yellow-500 transition-colors rounded-full hover:bg-gray-100"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </button>
+                            {showEmoji && (
+                                <div className="absolute bottom-12 left-0 z-50 shadow-xl rounded-2xl overflow-hidden animate-popIn">
+                                    <EmojiPicker onEmojiClick={onEmojiClick} theme={EmojiTheme.LIGHT} />
+                                </div>
+                            )}
+                        </div>
 
-                    <button
-                        type="button"
-                        onMouseDown={startRecording}
-                        onMouseUp={stopRecording}
-                        onMouseLeave={stopRecording}
-                        className={`p-3 rounded-full shadow-lg transition-all ${isRecording ? 'bg-red-500 text-white scale-110' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-                        </svg>
-                    </button>
+                        {/* GIF Picker */}
+                        <div className="relative">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowGif(!showGif);
+                                    if (!showGif) fetchGifs();
+                                }}
+                                className="p-2 text-gray-500 hover:text-pink-500 transition-colors rounded-full hover:bg-gray-100"
+                            >
+                                <span className="font-bold text-xs border border-current rounded px-1">GIF</span>
+                            </button>
+                            {showGif && (
+                                <div className="absolute bottom-12 left-0 z-50 w-64 h-80 bg-white rounded-xl shadow-xl border border-gray-100 flex flex-col overflow-hidden animate-popIn">
+                                    <div className="p-2 border-b">
+                                        <input
+                                            type="text"
+                                            placeholder="Search GIFs..."
+                                            className="w-full px-3 py-1 rounded-lg bg-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+                                            onChange={(e) => fetchGifs(e.target.value)}
+                                        />
+                                    </div>
+                                    <div className="flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-2">
+                                        {gifs.map((gif) => (
+                                            <button
+                                                key={gif.id}
+                                                onClick={() => sendGif(gif.images.fixed_height.url)}
+                                                className="hover:opacity-80 transition-opacity"
+                                            >
+                                                <img src={gif.images.fixed_height.url} alt={gif.title} className="w-full h-auto rounded-md" />
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
 
-                    <button
-                        onClick={() => sendMessage()}
-                        disabled={!input.trim()}
-                        className={`p-3 ${theme.button} text-white rounded-full shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed`}
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-                        </svg>
-                    </button>
+                        {/* Audio Recording */}
+                        <button
+                            type="button"
+                            onMouseDown={startRecording}
+                            onMouseUp={stopRecording}
+                            onMouseLeave={stopRecording}
+                            className={`p-2 rounded-full transition-all ${isRecording ? 'bg-red-500 text-white animate-pulse scale-110' : 'text-gray-500 hover:text-red-500 hover:bg-gray-100'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                            </svg>
+                        </button>
+
+                        {/* Text Input */}
+                        <input
+                            type="text"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => {
+                                handleTyping();
+                                if (e.key === 'Enter') sendMessage(e);
+                            }}
+                            placeholder="Type a message..."
+                            className={`flex-1 px-4 py-3 rounded-xl border-0 bg-gray-100 focus:bg-white focus:ring-2 ${theme.ring} transition-all shadow-inner`}
+                        />
+
+                        {/* Send Button */}
+                        <button
+                            type="submit"
+                            disabled={!input.trim()}
+                            className={`p-3 rounded-xl text-white shadow-md transition-all ${input.trim() ? `${theme.button} hover:scale-105 active:scale-95` : 'bg-gray-300 cursor-not-allowed'}`}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                            </svg>
+                        </button>
+                    </form>
                 </div>
             </div>
         </div>
